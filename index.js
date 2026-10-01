@@ -7,13 +7,12 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.MessageContent
     ]
 });
 
 // ==========================================
-// DATABASE MODELS (MongoDB)
+// DATABASE MODELS
 // ==========================================
 const userSchema = new mongoose.Schema({
     userId: String,
@@ -24,7 +23,6 @@ const UserRole = mongoose.model('UserRole', userSchema);
 
 const guildSchema = new mongoose.Schema({
     guildId: String,
-    honeypotChannelId: String, 
     honeypotTextChannelId: String, 
     softbanCount: { type: Number, default: 0 }
 });
@@ -61,74 +59,51 @@ client.on('guildMemberAdd', async (member) => {
 });
 
 // ==========================================
-// HONEYPOT LOGIC (Voice & Text)
+// HONEYPOT LOGIC (Text-Only Trap)
 // ==========================================
 
-// 1. Voice Trap
-client.on('voiceStateUpdate', async (oldState, newState) => {
-    const settings = await GuildSettings.findOne({ guildId: newState.guild.id });
-    if (!settings || !settings.honeypotChannelId) return;
-
-    if (newState.channelId === settings.honeypotChannelId && oldState.channelId !== newState.channelId) {
-        const member = newState.member;
-        if (!member || !member.bannable) return;
-
-        try {
-            await member.ban({ reason: 'Honeypot Voice' });
-            await newState.guild.members.unban(member.id, { reason: 'Softban' });
-            await GuildSettings.findOneAndUpdate({ guildId: newState.guild.id }, { $inc: { softbanCount: 1 } });
-        } catch (err) { console.error(err); }
-    }
-});
-
-// 2. Text Trap & Setup Command
 client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
 
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
     
-    // Text Trap: Softban if user types in the security channel
+    // TEXT TRAP: If user sends any message (Text, Image, File) in the honeypot channel
     if (settings && settings.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
+        // Ignore administrators so they can manage the channel
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
-                await message.member.ban({ reason: 'Honeypot Text' });
+                await message.member.ban({ reason: 'Honeypot Text Trap' });
                 await message.guild.members.unban(message.author.id, { reason: 'Softban' });
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
+                console.log(`🎯 Softbanned ${message.author.tag} for messaging in the trap.`);
             } catch (err) { console.error(err); }
         }
         return;
     }
 
-    // !setup #voice-channel
-    if (message.content.startsWith('!setup')) {
+    // !setup Command (Creates the Trap Chat)
+    if (message.content === '!setup') {
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
-        const channelMention = message.mentions.channels.first();
-        if (!channelMention || channelMention.type !== ChannelType.GuildVoice) {
-            return message.reply('❌ Please mention a **Voice Channel**. Example: `!setup #voice-room`');
-        }
-
         try {
-            const textChannel = await message.guild.channels.create({
-                name: '🛡️-security-center',
+            // Create a normal text channel that looks like a chat
+            const trapChannel = await message.guild.channels.create({
+                name: '💬-general-chat', // Name it something normal to lure people
                 type: ChannelType.GuildText,
-                position: 0,
+                position: 0, // Put it at the top
             });
 
             await GuildSettings.findOneAndUpdate(
                 { guildId: message.guild.id },
-                { 
-                    honeypotChannelId: channelMention.id, 
-                    honeypotTextChannelId: textChannel.id 
-                },
+                { honeypotTextChannelId: trapChannel.id },
                 { upsert: true }
             );
 
+            // Embed to inform admins or set as a hidden warning
             const setupEmbed = new EmbedBuilder()
-                .setTitle('⚠️ SYSTEM WARNING')
-                .setDescription('**DO NOT TYPE IN THIS CHANNEL!**\n\nAny user who sends a message here or joins the voice channel <#' + channelMention.id + '> will be instantly **Softbanned** from the server.\n\n*This is an automated security measure.*')
+                .setTitle('⚠️ SECURITY SYSTEM ACTIVE')
+                .setDescription(`This channel ${trapChannel} is now a **Honeypot**. \n\nAnyone who sends a message or an image here will be instantly **Softbanned**.`)
                 .setColor('Red')
-                .setThumbnail(message.guild.iconURL())
                 .setFooter({ text: 'NA' })
                 .setTimestamp();
 
@@ -139,8 +114,8 @@ client.on('messageCreate', async (message) => {
                     .setStyle(ButtonStyle.Secondary)
             );
 
-            await textChannel.send({ embeds: [setupEmbed], components: [row] });
-            await message.reply(`✅ Setup complete! The security channel has been created at the top: ${textChannel}`);
+            await trapChannel.send({ embeds: [setupEmbed], components: [row] });
+            await message.reply(`✅ Setup complete! Trap channel created: ${trapChannel}`);
 
         } catch (err) {
             console.error(err);
@@ -150,7 +125,7 @@ client.on('messageCreate', async (message) => {
 });
 
 // ==========================================
-// BUTTON INTERACTIONS (Hidden Stats)
+// BUTTON INTERACTIONS
 // ==========================================
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isButton()) return;
@@ -161,7 +136,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const statsEmbed = new EmbedBuilder()
             .setTitle('📊 Honeypot Stats')
-            .setDescription(`Total users caught in the trap: **${count}**`)
+            .setDescription(`Total users caught in the text trap: **${count}**`)
             .setColor('Blue')
             .setTimestamp();
 
