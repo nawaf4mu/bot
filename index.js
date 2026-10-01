@@ -14,7 +14,7 @@ const client = new Client({
 // ==========================================
 // CONFIGURATION
 // ==========================================
-// ضع هنا آيدي رتبة التوثيق أو أي رتبة تريد حذفها من الجميع عند الدخول
+// ضع هنا آيدي رتبة التوثيق (Unverified) التي تريد حذفها من القدامى فقط عند عودتهم
 const ROLES_TO_REMOVE = ['1396230071886549134']; 
 
 // ==========================================
@@ -43,7 +43,7 @@ client.on('ready', () => {
 });
 
 // ==========================================
-// ROLE PERSISTENCE & CLEANING
+// ROLE PERSISTENCE & SMART CLEANING
 // ==========================================
 
 // Save roles when a member leaves
@@ -57,33 +57,37 @@ client.on('guildMemberRemove', async (member) => {
     } catch (err) { console.error(err); }
 });
 
-// Restore roles and Clean unwanted roles (For New and Old members)
+// Restore roles and Clean ONLY for returning members
 client.on('guildMemberAdd', async (member) => {
     try {
         const savedData = await UserRole.findOne({ userId: member.id, guildId: member.guild.id });
         
-        // Delay to let verification bots finish their work
-        setTimeout(async () => {
-            try {
-                if (!member.guild) return;
+        // Execute ONLY if the member is "Old" (has saved roles)
+        if (savedData && savedData.roles.length > 0) {
+            console.log(`Returning member: ${member.user.tag}. Processing roles...`);
+            
+            setTimeout(async () => {
+                try {
+                    if (!member.guild) return;
 
-                // 1. Restore old roles if they exist (For Old Members)
-                if (savedData && savedData.roles.length > 0) {
+                    // 1. Restore old roles
                     await member.roles.add(savedData.roles);
-                    console.log(`Restored roles for ${member.user.tag}`);
-                }
 
-                // 2. Remove blacklist roles (For Everyone: New and Old)
-                const rolesToRemove = member.roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
-                if (rolesToRemove.size > 0) {
-                    await member.roles.remove(rolesToRemove);
-                    console.log(`Cleaned unwanted roles from ${member.user.tag}`);
+                    // 2. Remove unwanted roles (like Unverified) from this returning member
+                    const rolesToRemove = member.roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
+                    if (rolesToRemove.size > 0) {
+                        await member.roles.remove(rolesToRemove);
+                    }
+                    
+                    console.log(`Restored roles and cleaned unverified for ${member.user.tag}`);
+                } catch (err) {
+                    console.error(`Error processing returning member ${member.user.tag}:`, err);
                 }
-
-            } catch (err) {
-                console.error(`Error processing roles for ${member.user.tag}:`, err);
-            }
-        }, 10000); // 10 seconds delay
+            }, 10000); // 10 seconds delay to allow verification bots to finish
+        } else {
+            // If the member is "New", the bot ignores them completely
+            console.log(`New member: ${member.user.tag}. Ignoring role cleaning.`);
+        }
         
     } catch (err) {
         console.error(`Database error for ${member.user.tag}:`, err);
@@ -114,7 +118,7 @@ client.on('messageCreate', async (message) => {
                 // 3. Update stats
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
                 
-                console.log(`🎯 Softbanned ${message.author.tag} and cleaned message.`);
+                console.log(`🎯 Softbanned ${message.author.tag} and deleted message.`);
             } catch (err) { console.error(err); }
         }
         return;
