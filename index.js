@@ -39,23 +39,32 @@ client.on('ready', () => {
 // ==========================================
 // ROLE PERSISTENCE (Restore Roles)
 // ==========================================
-client.on('guildMemberRemove', async (member) => {
-    try {
-        await UserRole.findOneAndUpdate(
-            { userId: member.id, guildId: member.guild.id },
-            { roles: member.roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id) },
-            { upsert: true }
-        );
-    } catch (err) { console.error(err); }
-});
-
+// Restore roles and REMOVE any additional roles (like Unverified)
 client.on('guildMemberAdd', async (member) => {
     try {
         const savedData = await UserRole.findOne({ userId: member.id, guildId: member.guild.id });
+        
         if (savedData && savedData.roles.length > 0) {
-            await member.roles.add(savedData.roles);
+            // ⏳ تأخير زمني لضمان أن بوت التوثيق انتهى من إعطاء رتبة Unverified
+            console.log(`Processing roles for ${member.user.tag}...`);
+            
+            setTimeout(async () => {
+                try {
+                    if (member.guild) {
+                        // roles.set() يمسح جميع الرتب الحالية ويضع فقط الرتب المحفوظة
+                        // هذا سيحذف رتبة Unverified أو أي رتبة أخرى تلقائية
+                        await member.roles.set(savedData.roles); 
+                        
+                        console.log(`Restored EXACT roles for ${member.user.tag} and cleared additional roles.`);
+                    }
+                } catch (err) {
+                    console.error(`Error setting exact roles for ${member.user.tag}:`, err);
+                }
+            }, 10000); // 10 ثوانٍ تأخير
         }
-    } catch (err) { console.error(err); }
+    } catch (err) {
+        console.error(`Error retrieving roles for ${member.user.tag}:`, err);
+    }
 });
 
 // ==========================================
