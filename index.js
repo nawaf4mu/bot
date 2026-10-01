@@ -12,6 +12,12 @@ const client = new Client({
 });
 
 // ==========================================
+// CONFIGURATION
+// ==========================================
+// ضع هنا آيدي رتبة التوثيق أو أي رتبة تريد حذفها من الجميع عند الدخول
+const ROLES_TO_REMOVE = ['1396230071886549134']; 
+
+// ==========================================
 // DATABASE MODELS
 // ==========================================
 const userSchema = new mongoose.Schema({
@@ -37,33 +43,50 @@ client.on('ready', () => {
 });
 
 // ==========================================
-// ROLE PERSISTENCE (Restore Roles)
+// ROLE PERSISTENCE & CLEANING
 // ==========================================
-// Restore roles and REMOVE any additional roles (like Unverified)
+
+// Save roles when a member leaves
+client.on('guildMemberRemove', async (member) => {
+    try {
+        await UserRole.findOneAndUpdate(
+            { userId: member.id, guildId: member.guild.id },
+            { roles: member.roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id) },
+            { upsert: true }
+        );
+    } catch (err) { console.error(err); }
+});
+
+// Restore roles and Clean unwanted roles (For New and Old members)
 client.on('guildMemberAdd', async (member) => {
     try {
         const savedData = await UserRole.findOne({ userId: member.id, guildId: member.guild.id });
         
-        if (savedData && savedData.roles.length > 0) {
-            // ⏳ تأخير زمني لضمان أن بوت التوثيق انتهى من إعطاء رتبة Unverified
-            console.log(`Processing roles for ${member.user.tag}...`);
-            
-            setTimeout(async () => {
-                try {
-                    if (member.guild) {
-                        // roles.set() يمسح جميع الرتب الحالية ويضع فقط الرتب المحفوظة
-                        // هذا سيحذف رتبة Unverified أو أي رتبة أخرى تلقائية
-                        await member.roles.set(savedData.roles); 
-                        
-                        console.log(`Restored EXACT roles for ${member.user.tag} and cleared additional roles.`);
-                    }
-                } catch (err) {
-                    console.error(`Error setting exact roles for ${member.user.tag}:`, err);
+        // Delay to let verification bots finish their work
+        setTimeout(async () => {
+            try {
+                if (!member.guild) return;
+
+                // 1. Restore old roles if they exist (For Old Members)
+                if (savedData && savedData.roles.length > 0) {
+                    await member.roles.add(savedData.roles);
+                    console.log(`Restored roles for ${member.user.tag}`);
                 }
-            }, 10000); // 10 ثوانٍ تأخير
-        }
+
+                // 2. Remove blacklist roles (For Everyone: New and Old)
+                const rolesToRemove = member.roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
+                if (rolesToRemove.size > 0) {
+                    await member.roles.remove(rolesToRemove);
+                    console.log(`Cleaned unwanted roles from ${member.user.tag}`);
+                }
+
+            } catch (err) {
+                console.error(`Error processing roles for ${member.user.tag}:`, err);
+            }
+        }, 10000); // 10 seconds delay
+        
     } catch (err) {
-        console.error(`Error retrieving roles for ${member.user.tag}:`, err);
+        console.error(`Database error for ${member.user.tag}:`, err);
     }
 });
 
@@ -76,23 +99,22 @@ client.on('messageCreate', async (message) => {
 
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
     
-    // TEXT TRAP: If user sends anything in the honeypot channel
+    // TEXT TRAP: Triggered when any message is sent in the honeypot channel
     if (settings && settings.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
         
-        // Ignore administrators so they can manage the channel
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
-                // 1. DELETE THE MESSAGE IMMEDIATELY
-                await message.delete().catch(err => console.error("Could not delete message:", err));
+                // 1. Delete the message immediately
+                await message.delete().catch(() => {});
 
-                // 2. SOFTBAN THE USER
+                // 2. Softban the user
                 await message.member.ban({ reason: 'Honeypot Text Trap' });
                 await message.guild.members.unban(message.author.id, { reason: 'Softban' });
 
-                // 3. UPDATE STATS
+                // 3. Update stats
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
                 
-                console.log(`🎯 Softbanned ${message.author.tag} and deleted their message.`);
+                console.log(`🎯 Softbanned ${message.author.tag} and cleaned message.`);
             } catch (err) { console.error(err); }
         }
         return;
@@ -116,8 +138,8 @@ client.on('messageCreate', async (message) => {
             );
 
             const setupEmbed = new EmbedBuilder()
-                .setTitle('⚠️ SECURITY SYSTEM ACTIVE')
-                .setDescription(`This channel ${trapChannel} is now a **Honeypot**. \n\nAnyone who sends a message or an image here will be instantly **Softbanned**.`)
+                .setTitle('⚠️ SYSTEM WARNING')
+                .setDescription(`This channel ${trapChannel} is now a **Honeypot**. \n\nAny user who sends a message or an image here will be instantly **Softbanned**.`)
                 .setColor('Red')
                 .setFooter({ text: 'NA' })
                 .setTimestamp();
@@ -140,7 +162,7 @@ client.on('messageCreate', async (message) => {
 });
 
 // ==========================================
-// BUTTON INTERACTIONS
+// BUTTON INTERACTIONS (Ephemeral Stats)
 // ==========================================
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isButton()) return;
