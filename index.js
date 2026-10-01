@@ -59,7 +59,7 @@ client.on('guildMemberAdd', async (member) => {
 });
 
 // ==========================================
-// HONEYPOT LOGIC (Text-Only Trap)
+// HONEYPOT LOGIC (Text Trap + Auto Delete)
 // ==========================================
 
 client.on('messageCreate', async (message) => {
@@ -67,30 +67,37 @@ client.on('messageCreate', async (message) => {
 
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
     
-    // TEXT TRAP: If user sends any message (Text, Image, File) in the honeypot channel
+    // TEXT TRAP: If user sends anything in the honeypot channel
     if (settings && settings.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
+        
         // Ignore administrators so they can manage the channel
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
+                // 1. DELETE THE MESSAGE IMMEDIATELY
+                await message.delete().catch(err => console.error("Could not delete message:", err));
+
+                // 2. SOFTBAN THE USER
                 await message.member.ban({ reason: 'Honeypot Text Trap' });
                 await message.guild.members.unban(message.author.id, { reason: 'Softban' });
+
+                // 3. UPDATE STATS
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
-                console.log(`🎯 Softbanned ${message.author.tag} for messaging in the trap.`);
+                
+                console.log(`🎯 Softbanned ${message.author.tag} and deleted their message.`);
             } catch (err) { console.error(err); }
         }
         return;
     }
 
-    // !setup Command (Creates the Trap Chat)
+    // !setup Command
     if (message.content === '!setup') {
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
         try {
-            // Create a normal text channel that looks like a chat
             const trapChannel = await message.guild.channels.create({
-                name: '💬-general-chat', // Name it something normal to lure people
+                name: '💬-general-chat',
                 type: ChannelType.GuildText,
-                position: 0, // Put it at the top
+                position: 0,
             });
 
             await GuildSettings.findOneAndUpdate(
@@ -99,7 +106,6 @@ client.on('messageCreate', async (message) => {
                 { upsert: true }
             );
 
-            // Embed to inform admins or set as a hidden warning
             const setupEmbed = new EmbedBuilder()
                 .setTitle('⚠️ SECURITY SYSTEM ACTIVE')
                 .setDescription(`This channel ${trapChannel} is now a **Honeypot**. \n\nAnyone who sends a message or an image here will be instantly **Softbanned**.`)
