@@ -35,7 +35,7 @@ const guildSchema = new mongoose.Schema({
 });
 const GuildSettings = mongoose.model('GuildSettings', guildSchema);
 
-mongoose.connect(process.env.MONGO_URI).then(() => console.log('✅ Connected to MongoDB')).catch(console.error);
+mongoose.connect(process.env.MONGO_URI).then(() => console.log('✅ MongoDB Connected')).catch(console.error);
 
 // ==========================================
 // HELPERS
@@ -95,7 +95,7 @@ client.on('guildMemberAdd', async (member) => {
             setTimeout(async () => {
                 if (!member.guild) return;
                 await member.roles.add(savedData.roles);
-                const rolesToRemove = member.//roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
+                const rolesToRemove = member.roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
                 if (rolesToRemove.size > 0) await member.roles.remove(rolesToRemove);
             }, 10000);
         }
@@ -104,7 +104,8 @@ client.on('guildMemberAdd', async (member) => {
 
 client.on('guildMemberRemove', async (member) => {
     try {
-        await UserRole.findOneAndUpdate({ userId: member.id, guildId: member.guild.id }, { roles: member.roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id) }, { upsert: true });
+        const roles = member.roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id);
+        await UserRole.findOneAndUpdate({ userId: member.id, guildId: member.guild.id }, { roles: roles }, { upsert: true });
     } catch (err) { console.error(err); }
 });
 
@@ -115,7 +116,6 @@ client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
 
-    // --- الخطوة الأولى: فحص الفخ (الأولوية القصوى) ---
     if (settings?.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
@@ -126,12 +126,11 @@ client.on('messageCreate', async (message) => {
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
                 sendLog(message.guild.id, new EmbedBuilder().setTitle('🎯 Honeypot Triggered').setDescription(`User ${message.author} fell into the ${BOT_NAME} trap.`).setColor('Orange'));
             } catch (err) { console.error(err); }
-            return; // التوقف هنا لكي لا يطبق نظام NSFW
+            return;
         }
         return;
     }
 
-    // --- الخطوة الثانية: فحص الـ NSFW (للرومات العادية فقط) ---
     const content = message.content.toLowerCase();
     if (NSFW_KEYWORDS.some(word => content.includes(word))) {
         try {
