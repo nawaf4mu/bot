@@ -76,7 +76,6 @@ const registerCommands = async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     try {
         console.log('Registering slash commands...');
-        // تسجيل الأوامر على مستوى عالمي (Global) لكي تظهر في كل السيرفرات
         await rest.put(
             Routes.applicationCommands(process.env.CLIENT_ID),
             { body: commands },
@@ -88,8 +87,10 @@ const registerCommands = async () => {
 };
 
 // ==========================================
-// SECURITY SYSTEMS (Anti-Raid, Anti-NSFW, Anti-Nuke)
+// SECURITY SYSTEMS
 // ==========================================
+
+// 1. Role Restore & Anti-Raid
 let joinLog = [];
 client.on('guildMemberAdd', async (member) => {
     const now = Date.now();
@@ -114,12 +115,13 @@ client.on('guildMemberRemove', async (member) => {
     try {
         await UserRole.findOneAndUpdate(
             { userId: member.id, guildId: member.guild.id },
-            { roles: member.//roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id) },
+            { roles: member.roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id) },
             { upsert: true }
         );
     } catch (err) { console.error(err); }
 });
 
+// 2. Anti-NSFW & Honeypot
 client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
@@ -150,69 +152,10 @@ client.on('messageCreate', async (message) => {
     }
 });
 
+// 3. Anti-Nuke
 const channelCreationLog = new Map();
 client.on('channelCreate', async (channel) => {
     try {
         const auditLogs = await channel.guild.fetchAuditLogs({ limit: 1, type: AuditLogEvent.ChannelCreate });
         const entry = auditLogs.entries.first();
         if (!entry) return;
-        const { executor } = entry;
-        if (executor.id === client.user.id) return;
-
-        const now = Date.now();
-        const userLog = channelCreationLog.get(executor.id) || [];
-        userLog.push(now);
-        const recentCreations = userLog.filter(t => now - t < 10000);
-        channelCreationLog.set(executor.id, recentCreations);
-
-        if (recentCreations.length > NUKE_THRESHOLD) {
-            await executor.set('roles', []); 
-            await executor.ban({ reason: 'Server Nuking' });
-            const logEmbed = new EmbedBuilder().setTitle('🚨 NUKE PREVENTED').setDescription(`User ${executor.tag} attempted to nuke the server and was banned.`).setColor('DarkRed');
-            sendLog(channel.guild.id, logEmbed);
-        }
-    } catch (err) { console.error(err); }
-});
-
-// ==========================================
-// SLASH COMMAND HANDLERS
-// ==========================================
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-
-    if (interaction.commandName === 'setup') {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
-        try {
-            const trapChannel = await interaction.guild.channels.create({ name: '💬-general-chat', type: ChannelType.GuildText, position: 0 });
-            await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { honeypotTextChannelId: trapChannel.id }, { upsert: true });
-            const setupEmbed = new EmbedBuilder().setTitle('⚠️ SECURITY SYSTEM ACTIVE').setDescription(`Honeypot: ${trapChannel}\nAnti-NSFW & Anti-Nuke: **ENABLED**`).setColor('Red').setFooter({ text: 'NA' }).setTimestamp();
-            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('view_stats').setLabel('Honeypot Stats 📊').setStyle(ButtonStyle.Secondary));
-            await trapChannel.send({ embeds: [setupEmbed], components: [row] });
-            await interaction.reply({ content: `✅ Setup complete!`, ephemeral: true });
-        } catch (err) { interaction.reply({ content: '❌ Error.', ephemeral: true }); }
-    }
-
-    if (interaction.//commandName === 'setlogs') {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
-        const channel = interaction.options.getChannel('channel');
-        await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { logsChannelId: channel.id }, { upsert: true });
-        await interaction.reply({ content: `✅ Logs channel set to ${channel}`, ephemeral: true });
-    }
-});
-
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isButton()) return;
-    if (interaction.customId === 'view_stats') {
-        const settings = await GuildSettings.findOne({ guildId: interaction.guild.id });
-        const count = settings ? settings.softbanCount : 0;
-        const statsEmbed = new EmbedBuilder().setTitle('📊 Honeypot Stats').setDescription(`Total caught: **${count}**`).setColor('Blue');
-        await interaction.reply({ embeds: [statsEmbed], ephemeral: true });
-    }
-});
-
-client.on('ready', async () => {
-    console.log(`🚀 Security Bot Online as ${client.user.tag}`);
-    await registerCommands();
-});
-
-client.login(process.env.TOKEN);
