@@ -15,7 +15,7 @@ const client = new Client({
 // ==========================================
 // CONFIGURATION
 // ==========================================
-const BOT_NAME = 'NA'; // اسم الحقوق
+const BOT_NAME = 'NA'; 
 const ROLES_TO_REMOVE = ['1396230071886549134']; 
 const NSFW_KEYWORDS = ['nsfw', 'porn', 'sex', 'إباحي', 'جنسي']; 
 const RAID_THRESHOLD = 5; 
@@ -41,7 +41,6 @@ mongoose.connect(process.env.MONGO_URI).then(() => console.log('✅ Connected to
 // HELPERS
 // ==========================================
 async function sendLog(guildId, embed) {
-    // إضافة الحقوق لكل سجل (Log)
     embed.setFooter({ text: `Powered by ${BOT_NAME} Security System` }).setTimestamp();
     const settings = await GuildSettings.findOne({ guildId });
     if (settings && settings.logsChannelId) {
@@ -203,7 +202,7 @@ client.on('interactionCreate', async (interaction) => {
             const user = interaction.options.getUser('user');
             const msg = interaction.options.getString('message');
             try {
-                await user.send(`📩 **Message from ${BOT_NAME}:**\n${msg}`);
+                await user.send(msg); // إرسال الرسالة كما هي بدون أي إضافات
                 await interaction.reply({ content: `✅ Message sent to ${user.tag}`, ephemeral: true });
             } catch (err) {
                 await interaction.reply({ content: `❌ Could not send DM to ${user.tag}.`, ephemeral: true });
@@ -218,7 +217,7 @@ client.on('interactionCreate', async (interaction) => {
             for (const [id, member] of members) {
                 if (member.user.bot) continue;
                 try {
-                    await member.send(`📢 **Announcement from ${BOT_NAME}:**\n${msg}`);
+                    await member.send(msg); // إرسال الرسالة كما هي بدون أي إضافات
                     success++;
                     await new Promise(r => setTimeout(r, 1500));
                 } catch (e) { failed++; }
@@ -237,7 +236,7 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('ready', async () => {
     console.log(`🚀 ${BOT_NAME} Security Bot Online as ${client.user.tag}`);
-    client.user.setActivity(`🛡️ ${BOT_NAME} Security`, { type: 3 }); // WATCHING
+    client.user.setActivity(`🛡️ ${BOT_NAME} Security`, { type: 3 }); 
     await registerCommands();
 });
 
