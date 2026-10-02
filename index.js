@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, AuditLogEvent, REST, Routes } = require('discord.js');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
@@ -7,29 +7,29 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates
     ]
 });
 
 // ==========================================
 // CONFIGURATION
 // ==========================================
-// ضع هنا آيدي رتبة التوثيق (Unverified) التي تريد حذفها من القدامى فقط عند عودتهم
 const ROLES_TO_REMOVE = ['1396230071886549134']; 
+const NSFW_KEYWORDS = ['nsfw', 'porn', 'sex', 'إباحي', 'جنسي']; 
+const RAID_THRESHOLD = 5; 
+const NUKE_THRESHOLD = 3; 
 
 // ==========================================
 // DATABASE MODELS
 // ==========================================
-const userSchema = new mongoose.Schema({
-    userId: String,
-    guildId: String,
-    roles: [String]
-});
+const userSchema = new mongoose.Schema({ userId: String, guildId: String, roles: [String] });
 const UserRole = mongoose.model('UserRole', userSchema);
 
 const guildSchema = new mongoose.Schema({
     guildId: String,
     honeypotTextChannelId: String, 
+    logsChannelId: String, // Added for Logs
     softbanCount: { type: Number, default: 0 }
 });
 const GuildSettings = mongoose.model('GuildSettings', guildSchema);
@@ -38,15 +38,36 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB'))
     .catch(err => console.error('❌ MongoDB Error:', err));
 
-client.on('ready', () => {
-    console.log(`🚀 Bot online as ${client.user.tag}`);
-});
+// ==========================================
+// HELPERS
+// ==========================================
+async function sendLog(guildId, embed) {
+    const settings = await GuildSettings.findOne({ guildId });
+    if (settings && settings.logsChannelId) {
+        const channel = await client.channels.fetch(settings.logsChannelId).catch(() => null);
+        if (channel) channel.send({ embeds: [embed] }).catch(console.error);
+    }
+}
 
 // ==========================================
-// ROLE PERSISTENCE & SMART CLEANING
+// SLASH COMMANDS REGISTRATION
 // ==========================================
+const commands = [
+    { name: 'setup', description: 'Initialize Honeypot and Security Systems' },
+    { name: 'setlogs', description: 'Set the logs channel for the security system' },
+];
 
-// Save roles when a member leaves
+const registerCommands = async () => {
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+    try {
+        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+        console.log('Successfully registered application commands.');
+    } catch (error) { console.error('Error registering commands:', error); }
+};
+
+// ==========================================
+// 1. ROLE PERSISTENCE
+// ==========================================
 client.on('guildMemberRemove', async (member) => {
     try {
         await UserRole.findOneAndUpdate(
@@ -57,135 +78,125 @@ client.on('guildMemberRemove', async (member) => {
     } catch (err) { console.error(err); }
 });
 
-// Restore roles and Clean ONLY for returning members
 client.on('guildMemberAdd', async (member) => {
     try {
         const savedData = await UserRole.findOne({ userId: member.id, guildId: member.guild.id });
-        
-        // Execute ONLY if the member is "Old" (has saved roles)
         if (savedData && savedData.roles.length > 0) {
-            console.log(`Returning member: ${member.user.tag}. Processing roles...`);
-            
             setTimeout(async () => {
-                try {
-                    if (!member.guild) return;
-
-                    // 1. Restore old roles
-                    await member.roles.add(savedData.roles);
-
-                    // 2. Remove unwanted roles (like Unverified) from this returning member
-                    const rolesToRemove = member.roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
-                    if (rolesToRemove.size > 0) {
-                        await member.roles.remove(rolesToRemove);
-                    }
-                    
-                    console.log(`Restored roles and cleaned unverified for ${member.user.tag}`);
-                } catch (err) {
-                    console.error(`Error processing returning member ${member.user.tag}:`, err);
-                }
-            }, 10000); // 10 seconds delay to allow verification bots to finish
-        } else {
-            // If the member is "New", the bot ignores them completely
-            console.log(`New member: ${member.user.tag}. Ignoring role cleaning.`);
+                if (!member.guild) return;
+                await member.roles.add(savedData.roles);
+                const rolesToRemove = member.roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
+                if (rolesToRemove.size > 0) await member.roles.remove(rolesToRemove);
+            }, 10000);
         }
-        
-    } catch (err) {
-        console.error(`Database error for ${member.user.tag}:`, err);
-    }
+    } catch (err) { console.error(err); }
 });
 
 // ==========================================
-// HONEYPOT LOGIC (Text Trap + Auto Delete)
+// 2. ANTI-NSFW & HONEYPOT
 // ==========================================
-
 client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
-
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
-    
-    // TEXT TRAP: Triggered when any message is sent in the honeypot channel
+
+    // Anti-NSFW
+    const content = message.content.toLowerCase();
+    if (NSFW_KEYWORDS.some(word => content.includes(word))) {
+        try {
+            await message.delete();
+            await message.member.timeout(20 * 60 * 60 * 1000, 'NSFW Content');
+            const logEmbed = new EmbedBuilder().setTitle('🔞 NSFW Detected').setDescription(`User: ${message.author}\nChannel: ${message.channel}\nAction: Timeout 20h`).setColor('Red');
+            sendLog(message.guild.id, logEmbed);
+        } catch (err) { console.error(err); }
+        return;
+    }
+
+    // Honeypot
     if (settings && settings.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
-        
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
-                // 1. Delete the message immediately
                 await message.delete().catch(() => {});
-
-                // 2. Softban the user
-                await message.member.ban({ reason: 'Honeypot Text Trap' });
+                await message.member.ban({ reason: 'Honeypot Trap' });
                 await message.guild.members.unban(message.author.id, { reason: 'Softban' });
-
-                // 3. Update stats
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
                 
-                console.log(`🎯 Softbanned ${message.author.tag} and deleted message.`);
+                const logEmbed = new EmbedBuilder().setTitle('🎯 Honeypot Triggered').setDescription(`User ${message.author} fell into the trap and was softbanned.`).setColor('Orange');
+                sendLog(message.guild.id, logEmbed);
             } catch (err) { console.error(err); }
         }
         return;
     }
-
-    // !setup Command
-    if (message.content === '!setup') {
-        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
-
-        try {
-            const trapChannel = await message.guild.channels.create({
-                name: '💬-general-chat',
-                type: ChannelType.GuildText,
-                position: 0,
-            });
-
-            await GuildSettings.findOneAndUpdate(
-                { guildId: message.guild.id },
-                { honeypotTextChannelId: trapChannel.id },
-                { upsert: true }
-            );
-
-            const setupEmbed = new EmbedBuilder()
-                .setTitle('⚠️ SYSTEM WARNING')
-                .setDescription(`This channel ${trapChannel} is now a **Honeypot**. \n\nAny user who sends a message or an image here will be instantly **Softbanned**.`)
-                .setColor('Red')
-                .setFooter({ text: 'NA' })
-                .setTimestamp();
-
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('view_stats')
-                    .setLabel('Honeypot Statistics 📊')
-                    .setStyle(ButtonStyle.Secondary)
-            );
-
-            await trapChannel.send({ embeds: [setupEmbed], components: [row] });
-            await message.reply(`✅ Setup complete! Trap channel created: ${trapChannel}`);
-
-        } catch (err) {
-            console.error(err);
-            message.reply('❌ Error during setup.');
-        }
-    }
 });
 
 // ==========================================
-// BUTTON INTERACTIONS (Ephemeral Stats)
+// 3. ANTI-NUKE
+// ==========================================
+const channelCreationLog = new Map();
+client.on('channelCreate', async (channel) => {
+    try {
+        const auditLogs = await channel.guild.fetchAuditLogs({ limit: 1, type: AuditLogEvent.ChannelCreate });
+        const entry = auditLogs.entries.first();
+        if (!entry) return;
+        const { executor } = entry;
+        if (executor.id === client.user.id) return;
+
+        const now = Date.now();
+        const userLog = channelCreationLog.get(executor.id) || [];
+        userLog.push(now);
+        const recentCreations = userLog.filter(t => now - t < 10000);
+        channelCreationLog.set(executor.id, recentCreations);
+
+        if (recentCreations.length > NUKE_THRESHOLD) {
+            await executor.set('roles', []); 
+            await executor.ban({ reason: 'Server Nuking' });
+            const logEmbed = new EmbedBuilder().setTitle('🚨 NUKE PREVENTED').setDescription(`User ${executor.tag} attempted to nuke the server and was banned.`).setColor('DarkRed');
+            sendLog(channel.guild.id, logEmbed);
+        }
+    } catch (err) { console.error(err); }
+});
+
+// ==========================================
+// SLASH COMMANDS
 // ==========================================
 client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isButton()) return;
+    if (!interaction.isChatInputCommand()) return;
 
+    if (interaction.commandName === 'setup') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
+        try {
+            const trapChannel = await interaction.guild.channels.create({ name: '💬-general-chat', type: ChannelType.GuildText, position: 0 });
+            await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { honeypotTextChannelId: trapChannel.id }, { upsert: true });
+            const setupEmbed = new EmbedBuilder().setTitle('⚠️ SECURITY SYSTEM ACTIVE').setDescription(`Honeypot: ${trapChannel}\nAnti-NSFW & Anti-Nuke: **ENABLED**`).setColor('Red').setFooter({ text: 'NA' }).setTimestamp();
+            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('view_stats').setLabel('Honeypot Stats 📊').setStyle(ButtonStyle.Secondary));
+            await trapChannel.send({ embeds: [setupEmbed], components: [row] });
+            await interaction.reply({ content: `✅ Setup complete!`, ephemeral: true });
+        } catch (err) { interaction.reply({ content: '❌ Error.', ephemeral: true }); }
+    }
+
+    if (interaction.commandName === 'setlogs') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
+        const channelMention = interaction.options.getChannel('channel');
+        if (!channelMention) return interaction.reply({ content: '❌ Please mention a channel.', ephemeral: true });
+        
+        await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { logsChannelId: channelMention.id }, { upsert: true });
+        await interaction.reply({ content: `✅ Logs channel set to ${channelMention}`, ephemeral: true });
+    }
+});
+
+// Handle Stats Button
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
     if (interaction.customId === 'view_stats') {
         const settings = await GuildSettings.findOne({ guildId: interaction.guild.id });
         const count = settings ? settings.softbanCount : 0;
-
-        const statsEmbed = new EmbedBuilder()
-            .setTitle('📊 Honeypot Stats')
-            .setDescription(`Total users caught in the text trap: **${count}**`)
-            .setColor('Blue')
-            .setTimestamp();
-
-        await interaction.reply({ 
-            embeds: [statsEmbed], 
-            ephemeral: true 
-        });
+        const statsEmbed = new EmbedBuilder().setTitle('📊 Honeypot Stats').setDescription(`Total caught: **${count}**`).setColor('Blue');
+        await interaction.reply({ embeds: [statsEmbed], ephemeral: true });
     }
+});
+
+client.on('ready', async () => {
+    console.log(`🚀 Security Bot Online as ${client.user.tag}`);
+    await registerCommands();
 });
 
 client.login(process.env.TOKEN);
