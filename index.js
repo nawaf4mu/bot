@@ -95,7 +95,7 @@ client.on('guildMemberAdd', async (member) => {
             setTimeout(async () => {
                 if (!member.guild) return;
                 await member.roles.add(savedData.roles);
-                const rolesToRemove = member.roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
+                const rolesToRemove = member.//roles.cache.filter(role => ROLES_TO_REMOVE.includes(role.id));
                 if (rolesToRemove.size > 0) await member.roles.remove(rolesToRemove);
             }, 10000);
         }
@@ -109,22 +109,13 @@ client.on('guildMemberRemove', async (member) => {
 });
 
 // ==========================================
-// 2. ANTI-NSFW & HONEYPOT
+// 2. ANTI-NSFW & HONEYPOT (PRIORITY: HONEYPOT)
 // ==========================================
 client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
 
-    const content = message.content.toLowerCase();
-    if (NSFW_KEYWORDS.some(word => content.includes(word))) {
-        try {
-            await message.delete();
-            await message.member.timeout(20 * 60 * 60 * 1000, 'NSFW Content');
-            sendLog(message.guild.id, new EmbedBuilder().setTitle('🔞 NSFW Detected').setDescription(`User: ${message.author}\nAction: Timeout 20h`).setColor('Red'));
-        } catch (err) {}
-        return;
-    }
-
+    // --- الخطوة الأولى: فحص الفخ (الأولوية القصوى) ---
     if (settings?.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
@@ -135,7 +126,19 @@ client.on('messageCreate', async (message) => {
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
                 sendLog(message.guild.id, new EmbedBuilder().setTitle('🎯 Honeypot Triggered').setDescription(`User ${message.author} fell into the ${BOT_NAME} trap.`).setColor('Orange'));
             } catch (err) { console.error(err); }
+            return; // التوقف هنا لكي لا يطبق نظام NSFW
         }
+        return;
+    }
+
+    // --- الخطوة الثانية: فحص الـ NSFW (للرومات العادية فقط) ---
+    const content = message.content.toLowerCase();
+    if (NSFW_KEYWORDS.some(word => content.includes(word))) {
+        try {
+            await message.delete();
+            await message.member.timeout(20 * 60 * 60 * 1000, 'NSFW Content');
+            sendLog(message.guild.id, new EmbedBuilder().setTitle('🔞 NSFW Detected').setDescription(`User: ${message.author}\nAction: Timeout 20h`).setColor('Red'));
+        } catch (err) { console.error(err); }
         return;
     }
 });
@@ -202,7 +205,7 @@ client.on('interactionCreate', async (interaction) => {
             const user = interaction.options.getUser('user');
             const msg = interaction.options.getString('message');
             try {
-                await user.send(msg); // إرسال الرسالة كما هي بدون أي إضافات
+                await user.send(msg);
                 await interaction.reply({ content: `✅ Message sent to ${user.tag}`, ephemeral: true });
             } catch (err) {
                 await interaction.reply({ content: `❌ Could not send DM to ${user.tag}.`, ephemeral: true });
@@ -217,7 +220,7 @@ client.on('interactionCreate', async (interaction) => {
             for (const [id, member] of members) {
                 if (member.user.bot) continue;
                 try {
-                    await member.send(msg); // إرسال الرسالة كما هي بدون أي إضافات
+                    await member.send(msg);
                     success++;
                     await new Promise(r => setTimeout(r, 1500));
                 } catch (e) { failed++; }
