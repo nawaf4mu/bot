@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, AuditLogEvent, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, AuditLogEvent, REST, Routes, ApplicationCommandOptionType } = require('discord.js');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
@@ -15,7 +15,7 @@ const client = new Client({
 // ==========================================
 // CONFIGURATION
 // ==========================================
-const ROLES_TO_REMOVE = ['ID_رتبة_Unverified_هنا']; 
+const ROLES_TO_REMOVE = ['1396230071886549134']; 
 const NSFW_KEYWORDS = ['nsfw', 'porn', 'sex', 'إباحي', 'جنسي']; 
 const RAID_THRESHOLD = 5; 
 const NUKE_THRESHOLD = 3; 
@@ -29,7 +29,7 @@ const UserRole = mongoose.model('UserRole', userSchema);
 const guildSchema = new mongoose.Schema({
     guildId: String,
     honeypotTextChannelId: String, 
-    logsChannelId: String, // Added for Logs
+    logsChannelId: String, 
     softbanCount: { type: Number, default: 0 }
 });
 const GuildSettings = mongoose.model('GuildSettings', guildSchema);
@@ -53,32 +53,50 @@ async function sendLog(guildId, embed) {
 // SLASH COMMANDS REGISTRATION
 // ==========================================
 const commands = [
-    { name: 'setup', description: 'Initialize Honeypot and Security Systems' },
-    { name: 'setlogs', description: 'Set the logs channel for the security system' },
+    {
+        name: 'setup',
+        description: 'Initialize Honeypot and Security Systems',
+    },
+    {
+        name: 'setlogs',
+        description: 'Set the logs channel for the security system',
+        options: [
+            {
+                name: 'channel',
+                description: 'The channel for logs',
+                type: ApplicationCommandOptionType.Channel,
+                required: true,
+                channel_types: [ChannelType.GuildText],
+            },
+        ],
+    },
 ];
 
 const registerCommands = async () => {
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     try {
-        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
-        console.log('Successfully registered application commands.');
-    } catch (error) { console.error('Error registering commands:', error); }
+        console.log('Registering slash commands...');
+        // تسجيل الأوامر على مستوى عالمي (Global) لكي تظهر في كل السيرفرات
+        await rest.put(
+            Routes.applicationCommands(process.env.CLIENT_ID),
+            { body: commands },
+        );
+        console.log('✅ Slash commands registered successfully!');
+    } catch (error) {
+        console.error('❌ Error registering commands:', error);
+    }
 };
 
 // ==========================================
-// 1. ROLE PERSISTENCE
+// SECURITY SYSTEMS (Anti-Raid, Anti-NSFW, Anti-Nuke)
 // ==========================================
-client.on('guildMemberRemove', async (member) => {
-    try {
-        await UserRole.findOneAndUpdate(
-            { userId: member.id, guildId: member.guild.id },
-            { roles: member.roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id) },
-            { upsert: true }
-        );
-    } catch (err) { console.error(err); }
-});
-
+let joinLog = [];
 client.on('guildMemberAdd', async (member) => {
+    const now = Date.now();
+    joinLog.push(now);
+    joinLog = joinLog.filter(timestamp => now - timestamp < 60000);
+    if (joinLog.length > RAID_THRESHOLD) console.log(`🚨 RAID DETECTED in ${member.guild.name}!`);
+
     try {
         const savedData = await UserRole.findOne({ userId: member.id, guildId: member.guild.id });
         if (savedData && savedData.roles.length > 0) {
@@ -92,14 +110,20 @@ client.on('guildMemberAdd', async (member) => {
     } catch (err) { console.error(err); }
 });
 
-// ==========================================
-// 2. ANTI-NSFW & HONEYPOT
-// ==========================================
+client.on('guildMemberRemove', async (member) => {
+    try {
+        await UserRole.findOneAndUpdate(
+            { userId: member.id, guildId: member.guild.id },
+            { roles: member.//roles.cache.filter(r => r.id !== member.guild.id).map(r => r.id) },
+            { upsert: true }
+        );
+    } catch (err) { console.error(err); }
+});
+
 client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
     const settings = await GuildSettings.findOne({ guildId: message.guild.id });
 
-    // Anti-NSFW
     const content = message.content.toLowerCase();
     if (NSFW_KEYWORDS.some(word => content.includes(word))) {
         try {
@@ -111,7 +135,6 @@ client.on('messageCreate', async (message) => {
         return;
     }
 
-    // Honeypot
     if (settings && settings.honeypotTextChannelId && message.channel.id === settings.honeypotTextChannelId) {
         if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
             try {
@@ -119,7 +142,6 @@ client.on('messageCreate', async (message) => {
                 await message.member.ban({ reason: 'Honeypot Trap' });
                 await message.guild.members.unban(message.author.id, { reason: 'Softban' });
                 await GuildSettings.findOneAndUpdate({ guildId: message.guild.id }, { $inc: { softbanCount: 1 } });
-                
                 const logEmbed = new EmbedBuilder().setTitle('🎯 Honeypot Triggered').setDescription(`User ${message.author} fell into the trap and was softbanned.`).setColor('Orange');
                 sendLog(message.guild.id, logEmbed);
             } catch (err) { console.error(err); }
@@ -128,9 +150,6 @@ client.on('messageCreate', async (message) => {
     }
 });
 
-// ==========================================
-// 3. ANTI-NUKE
-// ==========================================
 const channelCreationLog = new Map();
 client.on('channelCreate', async (channel) => {
     try {
@@ -156,7 +175,7 @@ client.on('channelCreate', async (channel) => {
 });
 
 // ==========================================
-// SLASH COMMANDS
+// SLASH COMMAND HANDLERS
 // ==========================================
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
@@ -173,17 +192,14 @@ client.on('interactionCreate', async (interaction) => {
         } catch (err) { interaction.reply({ content: '❌ Error.', ephemeral: true }); }
     }
 
-    if (interaction.commandName === 'setlogs') {
+    if (interaction.//commandName === 'setlogs') {
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
-        const channelMention = interaction.options.getChannel('channel');
-        if (!channelMention) return interaction.reply({ content: '❌ Please mention a channel.', ephemeral: true });
-        
-        await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { logsChannelId: channelMention.id }, { upsert: true });
-        await interaction.reply({ content: `✅ Logs channel set to ${channelMention}`, ephemeral: true });
+        const channel = interaction.options.getChannel('channel');
+        await GuildSettings.findOneAndUpdate({ guildId: interaction.guild.id }, { logsChannelId: channel.id }, { upsert: true });
+        await interaction.reply({ content: `✅ Logs channel set to ${channel}`, ephemeral: true });
     }
 });
 
-// Handle Stats Button
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isButton()) return;
     if (interaction.customId === 'view_stats') {
